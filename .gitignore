@@ -1,0 +1,28 @@
+.build/
+.swiftpm/
+*.xcodeproj
+*.xcworkspace
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+/tmp/
+*.tmp
+
+# Service files (user-specific)
+*.plist
+
+# Output files
+/output/
+episode-transcribed.json
