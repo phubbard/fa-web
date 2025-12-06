@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/water.css">
+    <title>FluidAudio Transcription</title>
+</head>
+<body>
+    <h1>FluidAudio Transcription Service</h1>
+    <p><em>Speech-to-text with speaker diarization using FluidAudio</em></p>
+
+    <h2>Recent Jobs</h2>
+    <form action="/cleanup" method="post">
+        <button type="submit">🗑️ Cleanup Running Jobs</button>
+    </form>
+
+    <table>
+        <thead>
+        <tr>
+            <th>Time</th>
+            <th>Started</th>
+            <th>Podcast</th>
+            <th>Episode #</th>
+            <th>Status</th>
+            <th>Duration</th>
+            <th>Details</th>
+        </tr>
+        </thead>
+        <tbody>
+        #for(job in jobs):
+        <tr>
+            <td>#(job.timestamp)</td>
+            <td>#(job.timeAgo)</td>
+            <td>#(job.podcast)</td>
+            <td>#(job.episodeNumber)</td>
+            <td><strong>#(job.status)</strong></td>
+            <td>#if(job.duration):#(job.duration)#else:-#endif</td>
+            <td><a href="/job/#(job.jobId)">Details</a></td>
+        </tr>
+        #endfor
+        </tbody>
+    </table>
+</body>
+</html>
