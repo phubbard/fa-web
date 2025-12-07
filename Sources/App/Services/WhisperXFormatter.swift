@@ -3,13 +3,27 @@ import Foundation
 /// Converts aligned segments into WhisperX JSON format
 struct WhisperXFormatter {
 
+    /// Converts FluidAudio speaker format (S1, S2) to WhisperX format (SPEAKER_01, SPEAKER_02)
+    /// - Parameter speaker: Speaker ID from FluidAudio (e.g., "S1")
+    /// - Returns: WhisperX-formatted speaker ID (e.g., "SPEAKER_01")
+    private func convertSpeakerID(_ speaker: String) -> String {
+        // Extract number from speaker ID (e.g., "S1" -> "1")
+        if speaker.hasPrefix("S"), let numberPart = speaker.dropFirst().split(separator: " ").first,
+           let speakerNumber = Int(numberPart) {
+            // Format as SPEAKER_01, SPEAKER_02, etc.
+            return String(format: "SPEAKER_%02d", speakerNumber)
+        }
+        // Fallback: return original if format doesn't match
+        return speaker
+    }
+
     /// Builds WhisperX-compatible JSON from aligned segments
     /// - Parameter segments: Aligned segments with speaker labels and words
     /// - Returns: Dictionary matching WhisperX output format
     func buildWhisperXFormat(from segments: [AlignedSegment]) -> [String: Any] {
         let whisperXSegments = segments.map { segment -> [String: Any] in
             [
-                "speaker": segment.speaker,
+                "speaker": convertSpeakerID(segment.speaker),
                 "start": segment.start,
                 "end": segment.end,
                 "text": " " + segment.text.trimmingCharacters(in: .whitespaces),  // WhisperX adds single leading space
@@ -19,7 +33,7 @@ struct WhisperXFormatter {
                         "start": word.start,
                         "end": word.end,
                         "score": word.score,
-                        "speaker": word.speaker
+                        "speaker": convertSpeakerID(word.speaker)
                     ]
                 }
             ]
