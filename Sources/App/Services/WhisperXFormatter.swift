@@ -12,7 +12,7 @@ struct WhisperXFormatter {
                 "speaker": segment.speaker,
                 "start": segment.start,
                 "end": segment.end,
-                "text": " " + segment.text,  // WhisperX adds leading space
+                "text": " " + segment.text.trimmingCharacters(in: .whitespaces),  // WhisperX adds single leading space
                 "words": segment.words.map { word -> [String: Any] in
                     [
                         "word": word.word,

@@ -115,7 +115,9 @@ struct AlignedSegment {
     let words: [AlignedWord]
 
     var text: String {
-        words.map { $0.word }.joined(separator: " ")
+        // SentencePiece tokens already have leading spaces where appropriate
+        // Simply concatenate without adding extra separators
+        words.map { $0.word }.joined()
     }
 }
 
