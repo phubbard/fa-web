@@ -26,3 +26,4 @@ logs/
 # Output files
 /output/
 episode-transcribed.json
+samples/
