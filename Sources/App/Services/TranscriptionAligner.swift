@@ -19,37 +19,10 @@ struct TranscriptionAligner {
 
         let speakerSegments = diarizationResult.segments.sorted { $0.startTimeSeconds < $1.startTimeSeconds }
 
-        // Group words by speaker segment
-        var currentSegments: [AlignedSegment] = []
-        var currentSpeaker: String? = nil
-        var currentWords: [AlignedWord] = []
-        var currentStart: TimeInterval? = nil
-        var currentEnd: TimeInterval = 0
-
+        // First pass: assign speakers to all words
+        var wordsWithSpeakers: [(word: AlignedWord, speaker: String)] = []
         for token in tokenTimings {
-            // Find which speaker segment this word belongs to
             let speaker = findSpeaker(for: token, in: speakerSegments)
-
-            // If speaker changed, save current segment and start new one
-            if let prevSpeaker = currentSpeaker, speaker != prevSpeaker, !currentWords.isEmpty {
-                let segment = AlignedSegment(
-                    speaker: prevSpeaker,
-                    start: currentStart ?? token.startTime,
-                    end: currentEnd,
-                    words: currentWords
-                )
-                currentSegments.append(segment)
-                currentWords = []
-                currentStart = nil
-            }
-
-            // Add word to current segment
-            currentSpeaker = speaker
-            if currentStart == nil {
-                currentStart = token.startTime
-            }
-            currentEnd = token.endTime
-
             let word = AlignedWord(
                 word: token.token,
                 start: token.startTime,
@@ -57,6 +30,50 @@ struct TranscriptionAligner {
                 score: token.confidence,
                 speaker: speaker
             )
+            wordsWithSpeakers.append((word, speaker))
+        }
+
+        // Second pass: smooth speaker boundaries with minimum segment duration
+        // This prevents single-word speaker changes which are usually diarization errors
+        let minSegmentDuration: TimeInterval = 2.0  // Minimum 2 seconds per segment
+
+        var currentSegments: [AlignedSegment] = []
+        var currentSpeaker: String? = nil
+        var currentWords: [AlignedWord] = []
+        var currentStart: TimeInterval? = nil
+        var currentEnd: TimeInterval = 0
+
+        for (word, speaker) in wordsWithSpeakers {
+            // If speaker changed, check if we should commit the current segment
+            if let prevSpeaker = currentSpeaker, speaker != prevSpeaker, !currentWords.isEmpty {
+                let duration = currentEnd - (currentStart ?? 0)
+
+                // Only create new segment if current segment is long enough
+                // This prevents fragmenting sentences due to brief diarization errors
+                if duration >= minSegmentDuration {
+                    let segment = AlignedSegment(
+                        speaker: prevSpeaker,
+                        start: currentStart ?? word.start,
+                        end: currentEnd,
+                        words: currentWords
+                    )
+                    currentSegments.append(segment)
+                    currentWords = []
+                    currentStart = nil
+                    currentSpeaker = speaker
+                }
+                // Otherwise, keep accumulating words with the previous speaker
+                // (ignore brief speaker changes)
+            }
+
+            // Add word to current segment
+            if currentSpeaker == nil {
+                currentSpeaker = speaker
+            }
+            if currentStart == nil {
+                currentStart = word.start
+            }
+            currentEnd = word.end
             currentWords.append(word)
         }
 
