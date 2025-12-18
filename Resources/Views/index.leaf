@@ -41,5 +41,12 @@
         #endfor
         </tbody>
     </table>
+
+    <footer style="margin-top: 3em; padding-top: 1em; border-top: 1px solid #ccc; font-size: 0.9em; color: #666;">
+        <p>
+            Built: #(buildTimestamp) |
+            FluidAudio: <code>#(fluidAudioVersion)</code> (#(fluidAudioDate))
+        </p>
+    </footer>
 </body>
 </html>

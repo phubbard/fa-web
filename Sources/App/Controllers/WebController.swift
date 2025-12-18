@@ -11,6 +11,9 @@ struct WebController {
 
         struct Context: Encodable {
             let jobs: [JobContext]
+            let buildTimestamp: String
+            let fluidAudioVersion: String
+            let fluidAudioDate: String
         }
 
         struct JobContext: Encodable {
@@ -37,7 +40,14 @@ struct WebController {
             )
         }
 
-        return try await req.view.render("index", Context(jobs: jobContexts))
+        let context = Context(
+            jobs: jobContexts,
+            buildTimestamp: BuildInfo.buildTimestamp,
+            fluidAudioVersion: BuildInfo.fluidAudioVersion,
+            fluidAudioDate: BuildInfo.fluidAudioDate
+        )
+
+        return try await req.view.render("index", context)
     }
 
     // GET /job/:jobId - Job detail page
