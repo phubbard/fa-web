@@ -10,9 +10,13 @@ actor AudioProcessingService {
     private let aligner: TranscriptionAligner
     private let formatter: WhisperXFormatter
 
+    // Sortformer fallback (lazily initialized on first use)
+    private var sortformerDiarizer: SortformerDiarizer?
+
     init() {
         self.asrManager = AsrManager()
-        self.diarizerManager = OfflineDiarizerManager()
+        let config = OfflineDiarizerConfig.default.withSpeakers(min: 2)
+        self.diarizerManager = OfflineDiarizerManager(config: config)
         self.aligner = TranscriptionAligner()
         self.formatter = WhisperXFormatter()
     }
@@ -91,14 +95,20 @@ actor AudioProcessingService {
         }
 
         // 4. Run diarization (speaker identification)
-        await log("Running speaker diarization")
-        let diarizationResult: DiarizationResult
+        await log("Running speaker diarization (offline)")
+        var diarizationResult: DiarizationResult
         do {
             diarizationResult = try await diarizerManager.process(audio: audioSamples)
-            await log("Diarization complete: \(diarizationResult.segments.count) speaker segments found")
-
             let speakerSet = Set(diarizationResult.segments.map { $0.speakerId })
-            await log("Unique speakers: \(speakerSet.joined(separator: ", "))")
+            await log("Offline diarization: \(diarizationResult.segments.count) segments, \(speakerSet.count) speakers (\(speakerSet.joined(separator: ", ")))")
+
+            // If clustering collapsed to 1 speaker, fall back to Sortformer
+            if speakerSet.count <= 1 {
+                await log("WARNING: Offline diarizer found only \(speakerSet.count) speaker(s), falling back to Sortformer")
+                diarizationResult = try await runSortformerFallback(audioSamples: audioSamples, log: log)
+                let sfSpeakers = Set(diarizationResult.segments.map { $0.speakerId })
+                await log("Sortformer fallback: \(diarizationResult.segments.count) segments, \(sfSpeakers.count) speakers (\(sfSpeakers.joined(separator: ", ")))")
+            }
         } catch {
             await log("ERROR: Diarization failed: \(error)")
             throw error
@@ -122,5 +132,48 @@ actor AudioProcessingService {
 
         await log("Processing complete!")
         return outputPath
+    }
+
+    /// Run Sortformer diarization as fallback, returning a DiarizationResult
+    /// compatible with the existing aligner pipeline.
+    private func runSortformerFallback(
+        audioSamples: [Float],
+        log: (String) async -> Void
+    ) async throws -> DiarizationResult {
+        // Lazy init: download models and create diarizer on first use
+        if sortformerDiarizer == nil {
+            await log("Initializing Sortformer models (first-time download)...")
+            let config = SortformerConfig.default
+            let diarizer = SortformerDiarizer(config: config)
+            let models = try await SortformerModels.loadFromHuggingFace(config: config)
+            diarizer.initialize(models: models)
+            self.sortformerDiarizer = diarizer
+            await log("Sortformer models initialized")
+        }
+
+        guard let diarizer = sortformerDiarizer else {
+            throw Abort(.internalServerError, reason: "Sortformer diarizer failed to initialize")
+        }
+
+        await log("Running Sortformer diarization...")
+        diarizer.reset()
+        let timeline = try diarizer.processComplete(audioSamples)
+
+        // Convert SortformerSegment → TimedSpeakerSegment → DiarizationResult
+        let allSegments = timeline.segments.flatMap { $0 }
+        let activeSpeakers = Set(allSegments.map { $0.speakerIndex })
+        await log("Sortformer raw: \(allSegments.count) segments, \(activeSpeakers.count) active speakers")
+
+        let timedSegments = allSegments.map { seg in
+            TimedSpeakerSegment(
+                speakerId: "S\(seg.speakerIndex + 1)",
+                embedding: [],
+                startTimeSeconds: seg.startTime,
+                endTimeSeconds: seg.endTime,
+                qualityScore: 1.0
+            )
+        }
+
+        return DiarizationResult(segments: timedSegments)
     }
 }
