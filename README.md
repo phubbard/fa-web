@@ -23,8 +23,8 @@ This service provides:
 
 ```
 ┌─────────────────────────────────────────────┐
-│ User uploads MP3 via REST API               │
 │ POST /submit/:podcast/:episode              │
+│ Upload MP3, receive job ID (202 Accepted)   │
 └──────────────────┬──────────────────────────┘
                    │
                    ↓
@@ -35,12 +35,12 @@ This service provides:
 │ 3. Run diarization (speaker segments)      │
 │ 4. Align words to speakers                 │
 │ 5. Generate WhisperX JSON format           │
-└─────────────────────────────────────────────┘
+└──────────────────┬──────────────────────────┘
                    │
                    ↓
 ┌─────────────────────────────────────────────┐
-│ Output: WhisperX-compatible JSON            │
-│ /tmp/{podcast}_{episode}_transcription.json │
+│ GET /result/:jobId                          │
+│ Poll until 200 → WhisperX-compatible JSON   │
 └─────────────────────────────────────────────┘
 ```
 
@@ -76,36 +76,52 @@ This will:
 
 ## API Reference
 
+Full API specification: [`openapi.yaml`](openapi.yaml) (OpenAPI 3.0.3)
+
 ### Base URL
 ```
-http://axiom.phfactor.net:5051
+http://stt.phfactor.net
 ```
 
 ### Endpoints
 
 #### **POST /submit/:podcast/:episode**
-Submit an audio file for transcription.
+Submit an audio file for transcription. Returns immediately with a job ID.
 
-**Example:**
-```bash
-curl -X POST http://axiom.phfactor.net:5051/submit/my-podcast/123 \
-  -F file=@episode.mp3 \
-  -o episode-transcribed.json \
-  --fail --remove-on-error
+**Response:** `202 Accepted`
+```json
+{"jobId": "a1b2c3d4...", "status": "RUNNING"}
 ```
 
-**Parameters:**
-- `:podcast` - Podcast name (URL path parameter)
-- `:episode` - Episode number (URL path parameter)
-- `file` - MP3 audio file (multipart form data)
+#### **GET /result/:jobId**
+Poll for transcription result.
 
-**Response:**
-WhisperX-compatible JSON:
+- `202 Accepted` — still processing (`{"jobId": "...", "status": "RUNNING"}`)
+- `200 OK` — complete, body is the WhisperX-compatible JSON
+- `404` — job not found
+- `500` — transcription failed
+
+**Example client flow:**
+```bash
+# Submit
+JOB_ID=$(curl -s -X POST http://stt.phfactor.net/submit/my-podcast/123 \
+  -F file=@episode.mp3 | jq -r .jobId)
+
+# Poll until done
+while true; do
+  HTTP_CODE=$(curl -s -o episode-transcribed.json -w '%{http_code}' \
+    http://stt.phfactor.net/result/$JOB_ID)
+  [ "$HTTP_CODE" = "200" ] && break
+  sleep 10
+done
+```
+
+**WhisperX output format:**
 ```json
 {
   "segments": [
     {
-      "speaker": "S1",
+      "speaker": "SPEAKER_01",
       "start": 4.193548,
       "end": 20.764008,
       "text": " Hey, how's it going?",
@@ -115,7 +131,7 @@ WhisperX-compatible JSON:
           "start": 4.19,
           "end": 4.52,
           "score": 0.95,
-          "speaker": "S1"
+          "speaker": "SPEAKER_01"
         }
       ]
     }
@@ -134,7 +150,7 @@ Remove all stuck "RUNNING" jobs.
 
 ## Web UI
 
-Access at: `http://axiom.phfactor.net:5051`
+Access at: `http://stt.phfactor.net`
 
 Features:
 - Job list with status, duration, and timestamps
@@ -202,7 +218,8 @@ fa-web/
 │   │   └── JobLog.swift         # Log model
 │   ├── Migrations/
 │   │   ├── CreateJob.swift      # Job table migration
-│   │   └── CreateLog.swift      # Log table migration
+│   │   ├── CreateLog.swift      # Log table migration
+│   │   └── AddOutputPath.swift  # Add output_path column
 │   ├── Controllers/
 │   │   └── WebController.swift  # Web & API handlers
 │   └── Services/
@@ -227,7 +244,8 @@ CREATE TABLE jobs (
   job_id TEXT NOT NULL,
   elapsed INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL,
-  return_code INTEGER
+  return_code INTEGER,
+  output_path TEXT
 );
 ```
 

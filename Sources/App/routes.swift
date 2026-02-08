@@ -11,4 +11,5 @@ func routes(_ app: Application) throws {
 
     // REST API routes
     app.post("submit", ":podcast", ":episodeNumber", use: controller.submit)
+    app.get("result", ":jobId", use: controller.result)
 }

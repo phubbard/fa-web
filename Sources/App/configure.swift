@@ -18,6 +18,7 @@ public func configure(_ app: Application) throws {
     // Add migrations
     app.migrations.add(CreateJob())
     app.migrations.add(CreateLog())
+    app.migrations.add(AddOutputPath())
 
     // Configure Leaf templating
     app.views.use(.leaf)

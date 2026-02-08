@@ -28,6 +28,9 @@ final class Job: Model, Content {
     @OptionalField(key: "return_code")
     var returnCode: Int?
 
+    @OptionalField(key: "output_path")
+    var outputPath: String?
+
     @Children(for: \.$job)
     var logs: [JobLog]
 
