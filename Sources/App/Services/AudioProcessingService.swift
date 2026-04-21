@@ -6,17 +6,15 @@ import FluidAudio
 /// Service that processes audio files using FluidAudio and generates WhisperX-compatible output
 actor AudioProcessingService {
     private let asrManager: AsrManager
-    private let diarizerManager: OfflineDiarizerManager
     private let aligner: TranscriptionAligner
     private let formatter: WhisperXFormatter
 
-    // Sortformer fallback (lazily initialized on first use)
+    // Sortformer is our diarizer. Lazily initialized on first use so the
+    // HuggingFace model download happens inside a job (logged) rather than at boot.
     private var sortformerDiarizer: SortformerDiarizer?
 
     init() {
         self.asrManager = AsrManager()
-        let config = OfflineDiarizerConfig.default.withSpeakers(min: 2)
-        self.diarizerManager = OfflineDiarizerManager(config: config)
         self.aligner = TranscriptionAligner()
         self.formatter = WhisperXFormatter()
     }
@@ -66,19 +64,10 @@ actor AudioProcessingService {
         await log("Initializing ASR models")
         do {
             let asrModels = try await AsrModels.downloadAndLoad(version: .v3)
-            try await asrManager.initialize(models: asrModels)
+            try await asrManager.loadModels(asrModels)
             await log("ASR models initialized")
         } catch {
             await log("ERROR: Failed to initialize ASR: \(error)")
-            throw error
-        }
-
-        await log("Initializing diarization models")
-        do {
-            try await diarizerManager.prepareModels()
-            await log("Diarization models initialized")
-        } catch {
-            await log("ERROR: Failed to initialize diarization: \(error)")
             throw error
         }
 
@@ -94,21 +83,13 @@ actor AudioProcessingService {
             throw error
         }
 
-        // 4. Run diarization (speaker identification)
-        await log("Running speaker diarization (offline)")
-        var diarizationResult: DiarizationResult
+        // 4. Run diarization (Sortformer)
+        await log("Running speaker diarization (Sortformer)")
+        let diarizationResult: DiarizationResult
         do {
-            diarizationResult = try await diarizerManager.process(audio: audioSamples)
+            diarizationResult = try await runSortformer(audioSamples: audioSamples, log: log)
             let speakerSet = Set(diarizationResult.segments.map { $0.speakerId })
-            await log("Offline diarization: \(diarizationResult.segments.count) segments, \(speakerSet.count) speakers (\(speakerSet.joined(separator: ", ")))")
-
-            // If clustering collapsed to 1 speaker, fall back to Sortformer
-            if speakerSet.count <= 1 {
-                await log("WARNING: Offline diarizer found only \(speakerSet.count) speaker(s), falling back to Sortformer")
-                diarizationResult = try await runSortformerFallback(audioSamples: audioSamples, log: log)
-                let sfSpeakers = Set(diarizationResult.segments.map { $0.speakerId })
-                await log("Sortformer fallback: \(diarizationResult.segments.count) segments, \(sfSpeakers.count) speakers (\(sfSpeakers.joined(separator: ", ")))")
-            }
+            await log("Sortformer: \(diarizationResult.segments.count) segments, \(speakerSet.count) speakers (\(speakerSet.sorted().joined(separator: ", ")))")
         } catch {
             await log("ERROR: Diarization failed: \(error)")
             throw error
@@ -134,9 +115,9 @@ actor AudioProcessingService {
         return outputPath
     }
 
-    /// Run Sortformer diarization as fallback, returning a DiarizationResult
+    /// Run Sortformer diarization, returning a DiarizationResult
     /// compatible with the existing aligner pipeline.
-    private func runSortformerFallback(
+    private func runSortformer(
         audioSamples: [Float],
         log: (String) async -> Void
     ) async throws -> DiarizationResult {
@@ -159,8 +140,8 @@ actor AudioProcessingService {
         diarizer.reset()
         let timeline = try diarizer.processComplete(audioSamples)
 
-        // Convert SortformerSegment → TimedSpeakerSegment → DiarizationResult
-        let allSegments = timeline.segments.flatMap { $0 }
+        // Convert DiarizerSegment → TimedSpeakerSegment → DiarizationResult
+        let allSegments = timeline.speakers.values.flatMap { $0.finalizedSegments }
         let activeSpeakers = Set(allSegments.map { $0.speakerIndex })
         await log("Sortformer raw: \(allSegments.count) segments, \(activeSpeakers.count) active speakers")
 

@@ -270,36 +270,52 @@ The `AudioProcessingService` orchestrates the entire workflow:
 let audioSamples = try AudioConverter.resampleAudioFile(path: audioPath)
 
 // 2. Run ASR (Automatic Speech Recognition)
-let asrResult = try await asrManager.transcribe(audioSamples)
-// Returns: full text + word-level timestamps + confidence scores
+let asrResult = try await asrManager.transcribe(audioSamples, source: .system)
+// Returns: full text + sub-word token timestamps + confidence scores
 
-// 3. Run speaker diarization
-let diarizationResult = try await diarizerManager.process(audio: audioSamples)
+// 3. Run speaker diarization (Sortformer)
+let diarizationResult = try runSortformer(audioSamples: audioSamples, log: log)
 // Returns: speaker segments with start/end times
 
-// 4. Align words to speakers
+// 4. Aggregate tokens into words, then align to speakers
 let alignedSegments = aligner.align(asrResult, diarizationResult)
-// Matches each word to its speaker based on timestamp overlap
 
 // 5. Build WhisperX format
 let json = formatter.buildWhisperXFormat(from: alignedSegments)
 ```
 
-### 2. Word-to-Speaker Alignment Algorithm
+### 2. Diarization: Sortformer-only
 
-The `TranscriptionAligner` matches ASR words to diarization speakers:
+FluidAudio's offline diarizer (WeSpeaker embeddings + AHC/VBx clustering) was
+prone to collapsing to effectively one speaker on real podcasts — returning two
+speaker labels, but with 99%+ of audio assigned to one of them. We now run
+Sortformer exclusively: it's ~3× slower (RTF ≈ 4.3% vs ≈ 1.5% for offline) but
+reliably separates hosts on content where offline clustering failed.
 
-1. **For each word from ASR:**
-   - Calculate word midpoint: `(start + end) / 2`
-   - Find which speaker segment contains that midpoint
+Sortformer has four fixed speaker slots, so on two-host shows it will sometimes
+attribute short spans to spurious `SPEAKER_03`/`SPEAKER_04` — an acceptable
+trade for correct majority-speaker attribution.
 
-2. **Group consecutive words by speaker:**
-   - When speaker changes, create new segment
-   - Combine words into text
-   - Preserve word-level timestamps
+### 3. Word-to-Speaker Alignment Algorithm
 
-3. **Output aligned segments:**
-   - Each segment has: speaker, start, end, text, words array
+The `TranscriptionAligner` matches ASR tokens to diarization speakers:
+
+1. **Aggregate sub-word tokens into whole words.**
+   FluidAudio's Parakeet ASR emits SentencePiece sub-words (e.g. `" H"`,
+   `"ello"`, `","`). Tokens starting with `" "` or `"▁"` begin a new word.
+   Assigning speakers at the token level caused mid-word splits when a
+   diarization boundary landed inside a word (e.g. `"bump"` → `"b"` /
+   `"ump"`). Aggregating first guarantees whole-word speaker decisions.
+
+2. **Pick each word's speaker by longest temporal overlap**
+   with the diarization segments (falls back to nearest segment if no overlap).
+
+3. **Group consecutive words by speaker, with 2s minimum segment duration.**
+   Brief speaker switches below this threshold are treated as diarization
+   glitches and merged into the surrounding speaker.
+
+4. **Output aligned segments:** each has `speaker`, `start`, `end`, `text`,
+   and a `words` array with per-word timings and speaker labels.
 
 ### 3. WhisperX Format Compatibility
 
@@ -310,10 +326,12 @@ Output exactly matches WhisperX structure:
 
 ## Performance
 
-- **Real-time Factor**: ~120x on M4 Pro (processes 1 hour in ~30 seconds)
-- **Models**: Auto-downloaded and cached on first run
-- **Memory**: Efficient streaming for large audio files
-- **Concurrent Jobs**: Processes one job at a time (configurable)
+- **Real-time Factor**: ~4% on M4 Pro (80-min episode in ~3–4 min), dominated
+  by Sortformer diarization. ASR alone is much faster.
+- **Models**: Auto-downloaded and cached on first run (Parakeet TDT v3 for ASR,
+  NVIDIA Sortformer for diarization).
+- **Memory**: Efficient streaming for large audio files.
+- **Concurrent Jobs**: Processes one job at a time (configurable).
 
 ## Troubleshooting
 
@@ -357,9 +375,9 @@ swift build
 | Feature | Flask/WhisperX | FluidAudio/Vapor |
 |---------|----------------|------------------|
 | Language | Python | Swift |
-| STT Engine | WhisperX | FluidAudio (Parakeet TDT) |
-| Diarization | WhisperX | FluidAudio (WeSpeaker + VBx) |
-| Performance | ~1x real-time | ~120x real-time |
+| STT Engine | WhisperX | FluidAudio (Parakeet TDT v3) |
+| Diarization | WhisperX (pyannote) | FluidAudio (Sortformer) |
+| Performance | ~1x real-time | ~25x real-time |
 | Platform | CUDA (GPU) | Apple Neural Engine |
 | Output Format | ✅ Identical | ✅ Identical |
 | REST API | ✅ Port 5050 | ✅ Port 5051 |

@@ -6,7 +6,7 @@ struct TranscriptionAligner {
 
     /// Aligns words from ASR with speakers from diarization
     /// - Parameters:
-    ///   - asrResult: ASR result with word-level timings
+    ///   - asrResult: ASR result with token-level timings
     ///   - diarizationResult: Diarization result with speaker segments
     /// - Returns: Array of aligned segments with speaker labels and text
     func align(
@@ -19,23 +19,14 @@ struct TranscriptionAligner {
 
         let speakerSegments = diarizationResult.segments.sorted { $0.startTimeSeconds < $1.startTimeSeconds }
 
-        // First pass: assign speakers to all words
-        var wordsWithSpeakers: [(word: AlignedWord, speaker: String)] = []
-        for token in tokenTimings {
-            let speaker = findSpeaker(for: token, in: speakerSegments)
-            let word = AlignedWord(
-                word: token.token,
-                start: token.startTime,
-                end: token.endTime,
-                score: token.confidence,
-                speaker: speaker
-            )
-            wordsWithSpeakers.append((word, speaker))
-        }
+        // Aggregate sub-word tokens into whole words before speaker assignment.
+        // Otherwise a diarization boundary landing mid-word splits a single word
+        // across two speakers (e.g. "bump" → "b" / "ump").
+        let words = buildWords(from: tokenTimings, speakerSegments: speakerSegments)
 
-        // Second pass: smooth speaker boundaries with minimum segment duration
-        // This prevents single-word speaker changes which are usually diarization errors
-        let minSegmentDuration: TimeInterval = 2.0  // Minimum 2 seconds per segment
+        // Smooth speaker boundaries with a minimum segment duration to ignore
+        // very brief diarization glitches.
+        let minSegmentDuration: TimeInterval = 2.0
 
         var currentSegments: [AlignedSegment] = []
         var currentSpeaker: String? = nil
@@ -43,13 +34,10 @@ struct TranscriptionAligner {
         var currentStart: TimeInterval? = nil
         var currentEnd: TimeInterval = 0
 
-        for (word, speaker) in wordsWithSpeakers {
-            // If speaker changed, check if we should commit the current segment
+        for word in words {
+            let speaker = word.speaker
             if let prevSpeaker = currentSpeaker, speaker != prevSpeaker, !currentWords.isEmpty {
                 let duration = currentEnd - (currentStart ?? 0)
-
-                // Only create new segment if current segment is long enough
-                // This prevents fragmenting sentences due to brief diarization errors
                 if duration >= minSegmentDuration {
                     let segment = AlignedSegment(
                         speaker: prevSpeaker,
@@ -62,65 +50,93 @@ struct TranscriptionAligner {
                     currentStart = nil
                     currentSpeaker = speaker
                 }
-                // Otherwise, keep accumulating words with the previous speaker
-                // (ignore brief speaker changes)
             }
 
-            // Add word to current segment
-            if currentSpeaker == nil {
-                currentSpeaker = speaker
-            }
-            if currentStart == nil {
-                currentStart = word.start
-            }
+            if currentSpeaker == nil { currentSpeaker = speaker }
+            if currentStart == nil { currentStart = word.start }
             currentEnd = word.end
             currentWords.append(word)
         }
 
-        // Don't forget the last segment
         if !currentWords.isEmpty, let speaker = currentSpeaker, let start = currentStart {
-            let segment = AlignedSegment(
+            currentSegments.append(AlignedSegment(
                 speaker: speaker,
                 start: start,
                 end: currentEnd,
                 words: currentWords
-            )
-            currentSegments.append(segment)
+            ))
         }
 
         return currentSegments
     }
 
-    /// Finds which speaker segment a token belongs to based on temporal overlap
-    private func findSpeaker(
-        for token: TokenTiming,
-        in speakerSegments: [TimedSpeakerSegment]
-    ) -> String {
-        let tokenMidpoint = Float((token.startTime + token.endTime) / 2)
+    /// Groups consecutive sub-word tokens into whole words and assigns each
+    /// whole word the speaker with the greatest temporal overlap. SentencePiece
+    /// rule: tokens starting with " " or "▁" begin a new word.
+    private func buildWords(
+        from tokenTimings: [TokenTiming],
+        speakerSegments: [TimedSpeakerSegment]
+    ) -> [AlignedWord] {
+        var words: [AlignedWord] = []
+        var buffer: [TokenTiming] = []
 
-        // Find speaker segment that contains the token midpoint
-        for segment in speakerSegments {
-            if tokenMidpoint >= segment.startTimeSeconds && tokenMidpoint <= segment.endTimeSeconds {
-                return segment.speakerId
-            }
+        func flush() {
+            guard !buffer.isEmpty else { return }
+            let text = buffer.map(\.token).joined()
+            let start = buffer.first!.startTime
+            let end = buffer.last!.endTime
+            let scoreSum = buffer.reduce(Float(0)) { $0 + $1.confidence }
+            let score = scoreSum / Float(buffer.count)
+            let speaker = bestSpeaker(start: start, end: end, in: speakerSegments)
+            words.append(AlignedWord(word: text, start: start, end: end, score: score, speaker: speaker))
+            buffer.removeAll(keepingCapacity: true)
         }
 
-        // Fallback: find closest speaker segment
-        var closestSpeaker = "SPEAKER_UNKNOWN"
-        var minDistance = Float.infinity
+        for token in tokenTimings {
+            let startsNewWord = token.token.hasPrefix(" ") || token.token.hasPrefix("\u{2581}")
+            if startsNewWord && !buffer.isEmpty {
+                flush()
+            }
+            buffer.append(token)
+        }
+        flush()
+        return words
+    }
+
+    /// Returns the speaker whose segment has the greatest temporal overlap
+    /// with [start, end]. Falls back to the nearest segment if there is no overlap.
+    private func bestSpeaker(
+        start: TimeInterval,
+        end: TimeInterval,
+        in speakerSegments: [TimedSpeakerSegment]
+    ) -> String {
+        let wordStart = Float(start)
+        let wordEnd = Float(end)
+        var best = "SPEAKER_UNKNOWN"
+        var bestOverlap: Float = 0
 
         for segment in speakerSegments {
+            let overlap = min(wordEnd, segment.endTimeSeconds) - max(wordStart, segment.startTimeSeconds)
+            if overlap > bestOverlap {
+                bestOverlap = overlap
+                best = segment.speakerId
+            }
+        }
+        if bestOverlap > 0 { return best }
+
+        let midpoint = (wordStart + wordEnd) / 2
+        var minDistance = Float.infinity
+        for segment in speakerSegments {
             let distance = min(
-                abs(tokenMidpoint - segment.startTimeSeconds),
-                abs(tokenMidpoint - segment.endTimeSeconds)
+                abs(midpoint - segment.startTimeSeconds),
+                abs(midpoint - segment.endTimeSeconds)
             )
             if distance < minDistance {
                 minDistance = distance
-                closestSpeaker = segment.speakerId
+                best = segment.speakerId
             }
         }
-
-        return closestSpeaker
+        return best
     }
 }
 
