@@ -75,7 +75,10 @@ actor AudioProcessingService {
         await log("Running speech-to-text transcription")
         let asrResult: ASRResult
         do {
-            asrResult = try await asrManager.transcribe(audioSamples, source: .system)
+            // v0.14+: transcribe requires an explicit TDT decoder state (the old
+            // `source:` overload was removed). One state per file for a full-file pass.
+            var decoderState = TdtDecoderState.make(decoderLayers: await asrManager.decoderLayerCount)
+            asrResult = try await asrManager.transcribe(audioSamples, decoderState: &decoderState)
             await log("Transcription complete: \(asrResult.text.count) characters")
             await log("Confidence: \(asrResult.confidence)")
         } catch {
